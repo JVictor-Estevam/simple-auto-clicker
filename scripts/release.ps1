@@ -57,12 +57,19 @@ Use the **Source code** archives attached to this release, or clone the reposito
 - Global stop hotkey (F7 / F8)
 "@
 
-gh release view $Tag 2>$null
-if ($LASTEXITCODE -eq 0) {
+$prevErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+gh release view $Tag 2>&1 | Out-Null
+$releaseExists = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevErrorAction
+
+if ($releaseExists) {
     gh release upload $Tag $Exe --clobber
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "Release $Tag updated with executable."
 } else {
     gh release create $Tag $Exe --title $Tag --notes $Notes
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "Release $Tag created."
 }
 
