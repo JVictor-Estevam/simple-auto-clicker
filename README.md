@@ -15,12 +15,24 @@ Settings are stored locally and restored on the next launch.
 * Python 3.10 or newer
 * Windows or macOS (Linux may work but is not tested)
 
-## Installation
+## Download (Windows)
+
+Pre-built binaries are published on [GitHub Releases](https://github.com/JVictor-Estevam/simple-auto-clicker/releases).
+
+1. Open the latest **v1.0.0** (or newer) release.
+2. Download **Simple AutoClicker.exe** under *Assets*.
+3. Run the file. No Python installation required.
+
+Each release also includes **Source code** archives (`zip` and `tar.gz`) generated automatically from the tagged commit.
+
+Windows may show SmartScreen on first run because the executable is not code-signed. Use *More info → Run anyway* if you trust this repository.
+
+## Installation (from source)
 
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/your-username/simple-auto-clicker.git
+git clone https://github.com/JVictor-Estevam/simple-auto-clicker.git
 cd simple-auto-clicker
 pip install -r requirements.txt
 ```
@@ -45,7 +57,15 @@ pyinstaller build.spec --noconfirm
 
 Icon files live in `simple_autoclicker/files/`. Before packaging, `scripts/build_icon.py` crops transparent padding, flattens the PNG onto an opaque background, and rebuilds `autoclicker_pro_v5.ico` with all Windows sizes (16 through 256).
 
-The executable is written to `dist/Simple AutoClicker.exe`. Build artifacts under `build/` and `dist/` are not committed to the repository.
+The executable is written to `dist/Simple AutoClicker.exe`. Build artifacts under `build/` and `dist/` are not committed; publish the `.exe` via [GitHub Releases](https://github.com/JVictor-Estevam/simple-auto-clicker/releases) instead.
+
+To cut a release after building:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+gh release create v1.0.0 "dist/Simple AutoClicker.exe" --title "v1.0.0" --notes "First public release."
+```
 
 ## Settings file
 
