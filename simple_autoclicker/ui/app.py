@@ -30,6 +30,13 @@ from simple_autoclicker.constants import (
     WINDOW_WIDTH,
     mouse_controller,
 )
+from simple_autoclicker.action_queue import (
+    DEFAULT_QUEUE_STEP,
+    MAX_QUEUE_SIZE,
+    normalize_queue,
+    queue_uses_f7,
+    validate_queue,
+)
 from simple_autoclicker.engine import AutoClicker
 from simple_autoclicker.resources import asset_path
 from simple_autoclicker.screen import get_virtual_screen_bounds
@@ -60,9 +67,13 @@ class App(ctk.CTk):
         self._set_window_alpha(0)
 
         self.clicker = AutoClicker()
+        self.automation_mode = "single"
         self.action_type = "mouse"
         self.mouse_click_mode = "free"
         self._is_running = False
+        self._queue_rows: list[dict] = []
+        self._queue_pick_index: int | None = None
+        self._queue_key_capture_index: int | None = None
         self._stop_listener = None
         self._last_key = "space"
         self._coord_pick_active = False
@@ -282,8 +293,27 @@ class App(ctk.CTk):
     def _build_action_card(self, parent):
         _, content = self._card(parent, "Action")
 
-        self.action_segment = ctk.CTkSegmentedButton(
+        self.mode_segment = ctk.CTkSegmentedButton(
             content,
+            values=["Single", "Action queue"],
+            height=32,
+            font=(FONT, 11),
+            fg_color=BG_INPUT,
+            selected_color=ACCENT,
+            selected_hover_color=ACCENT_DIM,
+            unselected_color=BG_HOVER,
+            unselected_hover_color=BG_INPUT,
+            text_color=TEXT_PRI,
+            command=self._select_automation_mode_label,
+        )
+        self.mode_segment.set("Single")
+        self.mode_segment.pack(fill="x")
+
+        self.single_panel = ctk.CTkFrame(content, fg_color="transparent")
+        self.single_panel.pack(fill="x", pady=(8, 0))
+
+        self.action_segment = ctk.CTkSegmentedButton(
+            self.single_panel,
             values=["Mouse", "Key"],
             height=32,
             font=(FONT, 11),
@@ -298,7 +328,7 @@ class App(ctk.CTk):
         self.action_segment.set("Mouse")
         self.action_segment.pack(fill="x")
 
-        self.action_detail = ctk.CTkFrame(content, fg_color="transparent")
+        self.action_detail = ctk.CTkFrame(self.single_panel, fg_color="transparent")
         self.action_detail.pack(fill="x", pady=(8, 0))
 
         self.mouse_panel = ctk.CTkFrame(self.action_detail, fg_color="transparent")
@@ -436,9 +466,13 @@ class App(ctk.CTk):
             textvariable=self.hotkey_var,
             font=(FONT, 9),
             text_color=TEXT_SEC,
-            wraplength=360,
+            wraplength=400,
             justify="left",
         )
+
+        self.queue_panel = ctk.CTkFrame(content, fg_color="transparent")
+        self._build_queue_panel(self.queue_panel)
+
         self.hotkey_label.pack(anchor="w", pady=(8, 0))
 
         self._update_key_section_state()
@@ -446,6 +480,361 @@ class App(ctk.CTk):
     def _select_action_label(self, label):
         action = "mouse" if label == "Mouse" else "key"
         self._select_action(action)
+
+    # --- Action queue panel ---
+
+    def _build_queue_panel(self, parent):
+        parent.pack_forget()
+
+        hint = ctk.CTkLabel(
+            parent,
+            text="Build a sequence (up to 10 steps). Each step can wait before the next. "
+            "The full sequence repeats at the cycle interval in Timing.",
+            font=(FONT, 9),
+            text_color=TEXT_SEC,
+            wraplength=400,
+            justify="left",
+        )
+        hint.pack(anchor="w", pady=(0, 8))
+
+        self.queue_scroll = ctk.CTkScrollableFrame(
+            parent,
+            fg_color=BG_INPUT,
+            corner_radius=8,
+            height=180,
+            border_width=1,
+            border_color=BORDER,
+        )
+        self.queue_scroll.pack(fill="x")
+        self.queue_steps_frame = self.queue_scroll
+
+        controls = ctk.CTkFrame(parent, fg_color="transparent")
+        controls.pack(fill="x", pady=(8, 0))
+
+        self.queue_add_btn = ctk.CTkButton(
+            controls,
+            text="+ Add step",
+            height=30,
+            corner_radius=6,
+            font=(FONT, 10, "bold"),
+            fg_color=BG_HOVER,
+            hover_color=BG_INPUT,
+            text_color=ACCENT,
+            command=self._queue_add_step,
+        )
+        self.queue_add_btn.pack(side="left")
+
+        self.queue_count_label = ctk.CTkLabel(
+            controls,
+            text="0/10 steps",
+            font=(FONT, 9),
+            text_color=TEXT_SEC,
+        )
+        self.queue_count_label.pack(side="right", pady=6)
+
+    def _select_automation_mode_label(self, label):
+        mode = "queue" if label == "Action queue" else "single"
+        self._select_automation_mode(mode)
+
+    def _select_automation_mode(self, mode):
+        self.automation_mode = mode
+        label = "Action queue" if mode == "queue" else "Single"
+        if hasattr(self, "mode_segment"):
+            self.mode_segment.set(label)
+
+        if mode == "queue":
+            self.single_panel.pack_forget()
+            self.queue_panel.pack(fill="x", pady=(8, 0))
+            if not self._queue_rows:
+                self._queue_add_step()
+        else:
+            self.queue_panel.pack_forget()
+            self.single_panel.pack(fill="x", pady=(8, 0))
+
+        self._update_interval_hint()
+        self._update_key_section_state()
+        self._update_hotkey_hint()
+        self._refresh_geometry()
+
+    def _queue_snapshot(self) -> list[dict[str, str]]:
+        steps = []
+        for row in self._queue_rows:
+            steps.append({
+                "type": row["type_var"].get(),
+                "x": row["x_var"].get(),
+                "y": row["y_var"].get(),
+                "key": row["key_var"].get(),
+                "delay_after": row["delay_var"].get(),
+            })
+        return steps
+
+    def _queue_renumber(self):
+        for index, row in enumerate(self._queue_rows, start=1):
+            row["index_label"].configure(text=str(index))
+        count = len(self._queue_rows)
+        self.queue_count_label.configure(text=f"{count}/{MAX_QUEUE_SIZE} steps")
+        self.queue_add_btn.configure(state="normal" if count < MAX_QUEUE_SIZE else "disabled")
+
+    def _queue_add_step(self, step_data: dict | None = None):
+        if len(self._queue_rows) >= MAX_QUEUE_SIZE:
+            return
+
+        data = dict(DEFAULT_QUEUE_STEP)
+        if step_data:
+            data.update(step_data)
+
+        row_frame = ctk.CTkFrame(
+            self.queue_steps_frame,
+            fg_color=BG_PANEL,
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER,
+        )
+        row_frame.pack(fill="x", pady=(0, 6), padx=4)
+
+        header = ctk.CTkFrame(row_frame, fg_color="transparent")
+        header.pack(fill="x", padx=8, pady=(8, 4))
+
+        index_label = ctk.CTkLabel(
+            header,
+            text="1",
+            width=20,
+            font=(FONT, 11, "bold"),
+            text_color=ACCENT,
+        )
+        index_label.pack(side="left")
+
+        type_var = tk.StringVar(value=data["type"])
+        type_segment = ctk.CTkSegmentedButton(
+            header,
+            values=["Mouse", "Key"],
+            width=120,
+            height=26,
+            font=(FONT, 9),
+            fg_color=BG_INPUT,
+            selected_color=ACCENT,
+            selected_hover_color=ACCENT_DIM,
+            unselected_color=BG_HOVER,
+            unselected_hover_color=BG_INPUT,
+            text_color=TEXT_PRI,
+        )
+        type_segment.set("Mouse" if data["type"] == "mouse" else "Key")
+        type_segment.pack(side="left", padx=(6, 0))
+
+        remove_btn = ctk.CTkButton(
+            header,
+            text="Remove",
+            width=64,
+            height=24,
+            corner_radius=4,
+            font=(FONT, 9),
+            fg_color=BG_HOVER,
+            hover_color=DANGER_DIM,
+            text_color=TEXT_SEC,
+        )
+        remove_btn.pack(side="right")
+
+        body = ctk.CTkFrame(row_frame, fg_color="transparent")
+        body.pack(fill="x", padx=8, pady=(0, 8))
+
+        mouse_body = ctk.CTkFrame(body, fg_color="transparent")
+        key_body = ctk.CTkFrame(body, fg_color="transparent")
+
+        x_var = tk.StringVar(value=data["x"])
+        y_var = tk.StringVar(value=data["y"])
+        key_var = tk.StringVar(value=data["key"])
+        delay_var = tk.StringVar(value=data["delay_after"])
+
+        mouse_row = ctk.CTkFrame(mouse_body, fg_color="transparent")
+        mouse_row.pack(fill="x")
+
+        for col, (lbl, var) in enumerate((("X", x_var), ("Y", y_var))):
+            ctk.CTkLabel(
+                mouse_row,
+                text=lbl,
+                font=(FONT, 9),
+                text_color=TEXT_SEC,
+            ).grid(row=0, column=col * 2, sticky="w", padx=(0 if col == 0 else 8, 4))
+            entry = ctk.CTkEntry(
+                mouse_row,
+                textvariable=var,
+                width=60,
+                height=28,
+                corner_radius=6,
+                font=(FONT, 11, "bold"),
+                fg_color=BG_INPUT,
+                border_color=BORDER,
+                text_color=TEXT_PRI,
+                justify="center",
+            )
+            entry.grid(row=0, column=col * 2 + 1, sticky="w")
+            self._bind_numeric_entry(entry, "signed_int")
+
+        pick_btn = ctk.CTkButton(
+            mouse_row,
+            text="Pick",
+            width=52,
+            height=28,
+            corner_radius=6,
+            font=(FONT, 9),
+            fg_color=BG_HOVER,
+            hover_color=BG_INPUT,
+            text_color=ACCENT,
+        )
+        pick_btn.grid(row=0, column=4, padx=(8, 0))
+
+        key_row = ctk.CTkFrame(key_body, fg_color="transparent")
+        key_row.pack(fill="x")
+        key_row.grid_columnconfigure(0, weight=1)
+
+        key_entry = ctk.CTkEntry(
+            key_row,
+            textvariable=key_var,
+            height=28,
+            corner_radius=6,
+            font=(FONT, 12, "bold"),
+            fg_color=BG_INPUT,
+            border_color=BORDER,
+            text_color=TEXT_PRI,
+            placeholder_text="e.g. b, enter, space",
+            placeholder_text_color=TEXT_SEC,
+        )
+        key_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        capture_btn = ctk.CTkButton(
+            key_row,
+            text="Capture",
+            width=72,
+            height=28,
+            corner_radius=6,
+            font=(FONT, 9),
+            fg_color=BG_HOVER,
+            hover_color=BG_INPUT,
+            text_color=ACCENT,
+        )
+        capture_btn.grid(row=0, column=1)
+
+        wait_row = ctk.CTkFrame(body, fg_color="transparent")
+        wait_row.pack(fill="x", pady=(6, 0))
+
+        ctk.CTkLabel(
+            wait_row,
+            text="Then wait",
+            font=(FONT, 9),
+            text_color=TEXT_SEC,
+        ).pack(side="left")
+
+        delay_entry = ctk.CTkEntry(
+            wait_row,
+            textvariable=delay_var,
+            width=52,
+            height=28,
+            corner_radius=6,
+            font=(FONT, 11, "bold"),
+            fg_color=BG_INPUT,
+            border_color=BORDER,
+            text_color=TEXT_PRI,
+            justify="center",
+        )
+        delay_entry.pack(side="left", padx=(6, 0))
+        self._bind_numeric_entry(delay_entry, "decimal")
+
+        ctk.CTkLabel(
+            wait_row,
+            text="sec before next step",
+            font=(FONT, 9),
+            text_color=TEXT_SEC,
+        ).pack(side="left", padx=(6, 0), pady=5)
+
+        row_ref: dict = {
+            "frame": row_frame,
+            "index_label": index_label,
+            "type_var": type_var,
+            "type_segment": type_segment,
+            "mouse_body": mouse_body,
+            "key_body": key_body,
+            "x_var": x_var,
+            "y_var": y_var,
+            "key_var": key_var,
+            "delay_var": delay_var,
+            "pick_btn": pick_btn,
+            "capture_btn": capture_btn,
+            "key_entry": key_entry,
+            "remove_btn": remove_btn,
+        }
+        self._queue_rows.append(row_ref)
+        row_index = len(self._queue_rows) - 1
+
+        def refresh_type(*_):
+            is_mouse = type_var.get() == "mouse"
+            type_segment.set("Mouse" if is_mouse else "Key")
+            if is_mouse:
+                key_body.pack_forget()
+                mouse_body.pack(fill="x")
+            else:
+                mouse_body.pack_forget()
+                key_body.pack(fill="x")
+            self._update_hotkey_hint()
+            self._refresh_geometry()
+
+        def on_type_segment(label):
+            type_var.set("mouse" if label == "Mouse" else "key")
+            refresh_type()
+
+        type_segment.configure(command=on_type_segment)
+        type_var.trace_add("write", refresh_type)
+
+        pick_btn.configure(command=lambda i=row_index: self._queue_capture_position(i))
+        capture_btn.configure(command=lambda i=row_index: self._queue_capture_key(i))
+        remove_btn.configure(command=lambda i=row_index: self._queue_remove_step(i))
+
+        refresh_type()
+        self._queue_renumber()
+        self._refresh_geometry()
+
+    def _queue_remove_step(self, index: int):
+        if self._is_running or index < 0 or index >= len(self._queue_rows):
+            return
+        if len(self._queue_rows) <= 1:
+            messagebox.showinfo("Action queue", "Keep at least one step in the queue.")
+            return
+        row = self._queue_rows.pop(index)
+        row["frame"].destroy()
+        self._rebind_queue_row_callbacks()
+        self._queue_renumber()
+        self._refresh_geometry()
+
+    def _rebind_queue_row_callbacks(self):
+        for index, row in enumerate(self._queue_rows):
+            row["pick_btn"].configure(command=lambda i=index: self._queue_capture_position(i))
+            row["capture_btn"].configure(command=lambda i=index: self._queue_capture_key(i))
+            row["remove_btn"].configure(command=lambda i=index: self._queue_remove_step(i))
+
+    def _queue_clear_ui(self):
+        for row in self._queue_rows:
+            row["frame"].destroy()
+        self._queue_rows.clear()
+
+    def _queue_load_steps(self, steps: list[dict[str, str]]):
+        self._queue_clear_ui()
+        if steps:
+            for step in steps:
+                self._queue_add_step(step)
+        else:
+            self._queue_add_step()
+        self._queue_renumber()
+
+    def _queue_capture_position(self, index: int):
+        if self._is_running:
+            return
+        self._queue_pick_index = index
+        self._capture_mouse_position()
+
+    def _queue_capture_key(self, index: int):
+        if self._is_running:
+            return
+        self._queue_key_capture_index = index
+        self._capture_key()
 
     def _toggle_fixed_position(self):
         mode = "coords" if self.fixed_pos_var.get() else "free"
@@ -485,6 +874,15 @@ class App(ctk.CTk):
     def _update_key_section_state(self):
         if not hasattr(self, "key_entry"):
             return
+        if self.automation_mode == "queue":
+            self.key_entry.configure(state="disabled")
+            self.capture_key_btn.configure(state="disabled")
+            steps = self._queue_snapshot() if self._queue_rows else []
+            if queue_uses_f7(steps):
+                self.hotkey_label.configure(text_color=WARN)
+            else:
+                self.hotkey_label.configure(text_color=TEXT_SEC)
+            return
         if self.action_type == "mouse":
             self.key_entry.configure(state="disabled")
             self.capture_key_btn.configure(state="disabled")
@@ -507,6 +905,11 @@ class App(ctk.CTk):
         self._update_hotkey_hint(notify_f7=became_f7)
 
     def _get_force_stop_key(self):
+        if self.automation_mode == "queue":
+            steps = self._queue_snapshot() if self._queue_rows else []
+            if queue_uses_f7(steps):
+                return ALT_FORCE_STOP
+            return DEFAULT_FORCE_STOP
         if (
             self.action_type == "key"
             and hasattr(self, "key_var")
@@ -521,6 +924,19 @@ class App(ctk.CTk):
 
         stop_key = self._get_force_stop_key().upper()
         key = self.key_var.get().strip().lower() if hasattr(self, "key_var") else ""
+
+        if self.automation_mode == "queue":
+            steps = self._queue_snapshot() if self._queue_rows else []
+            if queue_uses_f7(steps):
+                text = f"Emergency stop: {stop_key} (F7 is in the queue)"
+                if hasattr(self, "hotkey_label"):
+                    self.hotkey_label.configure(text_color=WARN)
+            else:
+                text = f"Emergency stop: {stop_key}"
+                if hasattr(self, "hotkey_label"):
+                    self.hotkey_label.configure(text_color=TEXT_SEC)
+            self.hotkey_var.set(text)
+            return
 
         if self.action_type == "key" and key == "f7":
             text = f"Emergency stop: {stop_key} (F7 is in use)"
@@ -573,6 +989,18 @@ class App(ctk.CTk):
         self._bind_numeric_entry(self.interval_entry, "decimal")
 
         self._pack_inline_label(interval_row, "seconds", padx=(8, 0))
+
+        self.interval_hint_var = tk.StringVar(value="")
+        self.interval_hint_label = ctk.CTkLabel(
+            content,
+            textvariable=self.interval_hint_var,
+            font=(FONT, 9),
+            text_color=TEXT_SEC,
+            wraplength=400,
+            justify="left",
+        )
+        self.interval_hint_label.pack(anchor="w", pady=(4, 0))
+        self._update_interval_hint()
 
         presets = ctk.CTkFrame(content, fg_color="transparent")
         presets.pack(fill="x", anchor="w", pady=(8, 0))
@@ -639,6 +1067,20 @@ class App(ctk.CTk):
         self._toggle_repeat()
         self._sync_preset_highlight()
 
+    def _update_interval_hint(self):
+        if not hasattr(self, "interval_hint_var"):
+            return
+        if getattr(self, "automation_mode", "single") == "queue":
+            self.interval_hint_var.set(
+                "Cycle interval: pause after the full queue finishes before it runs again."
+            )
+            if hasattr(self, "repeat_checkbox"):
+                self.repeat_checkbox.configure(text="Limit queue cycles")
+        else:
+            self.interval_hint_var.set("Time between each repeated action.")
+            if hasattr(self, "repeat_checkbox"):
+                self.repeat_checkbox.configure(text="Limit repetitions")
+
     def _set_interval_preset(self, value):
         self.interval_var.set(str(value))
 
@@ -669,6 +1111,10 @@ class App(ctk.CTk):
     def _load_persisted_settings(self):
         data = load_settings()
 
+        mode = data.get("automation_mode", "single")
+        if mode not in ("single", "queue"):
+            mode = "single"
+
         action = data.get("action_type", "mouse")
         if action not in ("mouse", "key"):
             action = "mouse"
@@ -692,11 +1138,14 @@ class App(ctk.CTk):
         self.mouse_click_mode = mouse_mode
         self._select_action(action)
         self._select_mouse_mode(mouse_mode)
+        self._queue_load_steps(normalize_queue(data.get("action_queue", [])))
+        self._select_automation_mode(mode)
         self._sync_preset_highlight()
         self._update_hotkey_hint()
 
     def _save_persisted_settings(self):
-        save_settings({
+        payload = {
+            "automation_mode": self.automation_mode,
             "action_type": self.action_type,
             "mouse_click_mode": self.mouse_click_mode,
             "click_x": self.click_x_var.get(),
@@ -705,7 +1154,9 @@ class App(ctk.CTk):
             "interval": self.interval_var.get(),
             "repeat": self.repeat_var.get(),
             "repeat_count": self.repeat_count_var.get(),
-        })
+            "action_queue": self._queue_snapshot() if self._queue_rows else [],
+        }
+        save_settings(payload)
 
     # --- Emergency stop listener ---
 
@@ -786,6 +1237,15 @@ class App(ctk.CTk):
 
         if captured:
             key = captured.lower()
+            if self._queue_key_capture_index is not None and 0 <= self._queue_key_capture_index < len(self._queue_rows):
+                row = self._queue_rows[self._queue_key_capture_index]
+                row["key_var"].set(key)
+                row["type_var"].set("key")
+                self._queue_key_capture_index = None
+                self.status_var.set(f"Queue step key captured: '{captured}'")
+                self._update_hotkey_hint()
+                return
+
             became_f7 = key == "f7" and self._last_key != "f7"
             self._last_key = key
             self.key_var.set(key)
@@ -799,6 +1259,7 @@ class App(ctk.CTk):
             self._update_hotkey_hint()
         else:
             self.status_var.set("No key captured.")
+            self._queue_key_capture_index = None
 
         self._update_key_section_state()
 
@@ -891,6 +1352,18 @@ class App(ctk.CTk):
 
     def _finish_coord_pick(self, x, y):
         ix, iy = int(x), int(y)
+        if self._queue_pick_index is not None and 0 <= self._queue_pick_index < len(self._queue_rows):
+            row = self._queue_rows[self._queue_pick_index]
+            row["x_var"].set(str(ix))
+            row["y_var"].set(str(iy))
+            row["type_var"].set("mouse")
+            self._queue_pick_index = None
+            self._cleanup_coord_pick()
+            self.deiconify()
+            self.lift()
+            self.status_var.set(f"Queue step position captured: X={ix}, Y={iy}")
+            return
+
         self.click_x_var.set(str(ix))
         self.click_y_var.set(str(iy))
         self._cleanup_coord_pick()
@@ -904,6 +1377,7 @@ class App(ctk.CTk):
             )
 
     def _cancel_coord_pick(self):
+        self._queue_pick_index = None
         self._cleanup_coord_pick()
         self.deiconify()
         self.lift()
@@ -952,6 +1426,18 @@ class App(ctk.CTk):
 
     # --- Automation control ---
 
+    def _set_queue_editing_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        if hasattr(self, "mode_segment"):
+            self.mode_segment.configure(state=state)
+        if hasattr(self, "queue_add_btn"):
+            self.queue_add_btn.configure(state=state if len(self._queue_rows) < MAX_QUEUE_SIZE else "disabled")
+        for row in self._queue_rows:
+            row["type_segment"].configure(state=state)
+            row["pick_btn"].configure(state=state)
+            row["capture_btn"].configure(state=state)
+            row["remove_btn"].configure(state=state)
+
     def _set_running_ui(self, running):
         self._is_running = running
         if running:
@@ -960,11 +1446,12 @@ class App(ctk.CTk):
             self.status_label.configure(text_color=SUCCESS)
             self.tick_label.configure(text_color=SUCCESS)
             self.action_btn.configure(
-                text="Stop",
+                text="Stop(F7/F8)",
                 fg_color=DANGER,
                 hover_color=DANGER_DIM,
                 command=self._stop,
             )
+            self._set_queue_editing_enabled(False)
         else:
             self.state_dot.configure(fg_color=TEXT_SEC)
             self.state_label.configure(text="Idle", text_color=TEXT_SEC)
@@ -976,12 +1463,59 @@ class App(ctk.CTk):
                 hover_color=ACCENT_DIM,
                 command=self._start,
             )
+            self._set_queue_editing_enabled(True)
+            self._queue_renumber()
 
     def _start(self):
         if not PYNPUT_AVAILABLE:
             messagebox.showerror(
                 "Error",
                 "pynput library not found.\nInstall with: pip install pynput",
+            )
+            return
+
+        try:
+            interval = float(self.interval_var.get().replace(",", "."))
+            if interval < 0.05:
+                messagebox.showwarning("Warning", "Minimum interval is 0.05 seconds.")
+                return
+        except (ValueError, tk.TclError):
+            messagebox.showwarning("Warning", "Invalid interval.")
+            return
+
+        repeat = self.repeat_var.get()
+        try:
+            count = int(self.repeat_count_var.get()) if repeat else 0
+            if repeat and count < 1:
+                messagebox.showwarning("Warning", "Repeat count must be at least 1.")
+                return
+        except (ValueError, tk.TclError):
+            messagebox.showwarning("Warning", "Invalid repeat count.")
+            return
+
+        if self.automation_mode == "queue":
+            steps = self._queue_snapshot()
+            error = validate_queue(steps)
+            if error:
+                messagebox.showwarning("Action queue", error)
+                return
+
+            step_count = len(steps)
+            self.status_var.set(
+                f"Running: queue ({step_count} steps) every {interval}s cycle"
+            )
+            self.tick_var.set("Cycle 0")
+            self._set_running_ui(True)
+            self._start_force_stop_listener()
+            self._save_persisted_settings()
+
+            self.clicker.start_queue(
+                steps=steps,
+                cycle_interval=interval,
+                repeat=repeat,
+                repeat_count=count,
+                on_tick=self._on_queue_tick,
+                on_done=self._on_done,
             )
             return
 
@@ -1008,25 +1542,6 @@ class App(ctk.CTk):
                     "Use names like: enter, space, tab, f1, up, ctrl, delete, etc.",
                 )
                 return
-
-        try:
-            interval = float(self.interval_var.get().replace(",", "."))
-            if interval < 0.05:
-                messagebox.showwarning("Warning", "Minimum interval is 0.05 seconds.")
-                return
-        except (ValueError, tk.TclError):
-            messagebox.showwarning("Warning", "Invalid interval.")
-            return
-
-        repeat = self.repeat_var.get()
-        try:
-            count = int(self.repeat_count_var.get()) if repeat else 0
-            if repeat and count < 1:
-                messagebox.showwarning("Warning", "Repeat count must be at least 1.")
-                return
-        except (ValueError, tk.TclError):
-            messagebox.showwarning("Warning", "Invalid repeat count.")
-            return
 
         stop_key = self._get_force_stop_key().upper()
         if action == "mouse":
@@ -1064,6 +1579,12 @@ class App(ctk.CTk):
 
     def _on_tick(self, count):
         self.after(0, lambda: self.tick_var.set(f"{count} actions"))
+
+    def _on_queue_tick(self, cycle: int, step: int, total_steps: int):
+        self.after(
+            0,
+            lambda: self.tick_var.set(f"Cycle {cycle} · Step {step}/{total_steps}"),
+        )
 
     def _on_done(self):
         self.after(0, self._stop)

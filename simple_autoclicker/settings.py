@@ -3,6 +3,7 @@ import os
 import sys
 
 DEFAULT_SETTINGS = {
+    "automation_mode": "single",
     "action_type": "mouse",
     "mouse_click_mode": "free",
     "click_x": "0",
@@ -11,6 +12,7 @@ DEFAULT_SETTINGS = {
     "interval": "1.0",
     "repeat": False,
     "repeat_count": "10",
+    "action_queue": [],
 }
 
 

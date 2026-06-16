@@ -1,6 +1,8 @@
 import threading
 import time
+from typing import Callable
 
+from simple_autoclicker.action_queue import execute_step
 from simple_autoclicker.constants import (
     PYNPUT_AVAILABLE,
     SPECIAL_KEYS,
@@ -13,7 +15,7 @@ if PYNPUT_AVAILABLE:
 
 
 class AutoClicker:
-    """Runs repeated mouse clicks or key presses on a background thread."""
+    """Runs repeated mouse clicks, key presses, or action queues on a background thread."""
 
     def __init__(self) -> None:
         self.running = False
@@ -51,8 +53,31 @@ class AutoClicker:
         )
         self._thread.start()
 
+    def start_queue(
+        self,
+        steps: list[dict[str, str]],
+        cycle_interval: float,
+        repeat: bool,
+        repeat_count: int,
+        on_tick: Callable[[int, int, int], None],
+        on_done: Callable[[], None],
+    ) -> None:
+        self.running = True
+        self._thread = threading.Thread(
+            target=self._queue_loop,
+            args=(steps, cycle_interval, repeat, repeat_count, on_tick, on_done),
+            daemon=True,
+        )
+        self._thread.start()
+
     def stop(self) -> None:
         self.running = False
+
+    def _sleep(self, seconds: float) -> None:
+        elapsed = 0.0
+        while elapsed < seconds and self.running:
+            time.sleep(0.05)
+            elapsed += 0.05
 
     def _loop(
         self,
@@ -90,10 +115,48 @@ class AutoClicker:
             count += 1
             on_tick(count)
 
-            elapsed = 0.0
-            while elapsed < interval and self.running:
-                time.sleep(0.05)
-                elapsed += 0.05
+            self._sleep(interval)
+
+        self.running = False
+        on_done()
+
+    def _queue_loop(
+        self,
+        steps: list[dict[str, str]],
+        cycle_interval: float,
+        repeat: bool,
+        repeat_count: int,
+        on_tick: Callable[[int, int, int], None],
+        on_done: Callable[[], None],
+    ) -> None:
+        cycles = 0
+        total_steps = len(steps)
+
+        while self.running:
+            if repeat and cycles >= repeat_count:
+                break
+
+            for index, step in enumerate(steps):
+                if not self.running:
+                    break
+                try:
+                    execute_step(step)
+                except Exception:
+                    pass
+
+                on_tick(cycles + 1, index + 1, total_steps)
+
+                if index < total_steps - 1:
+                    try:
+                        delay = float(step["delay_after"].replace(",", "."))
+                    except (ValueError, AttributeError):
+                        delay = 0.0
+                    self._sleep(max(0.0, delay))
+
+            cycles += 1
+            if repeat and cycles >= repeat_count:
+                break
+            self._sleep(cycle_interval)
 
         self.running = False
         on_done()

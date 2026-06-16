@@ -19,7 +19,7 @@ Settings are stored locally and restored on the next launch.
 
 Pre-built binaries are published on [GitHub Releases](https://github.com/JVictor-Estevam/simple-auto-clicker/releases).
 
-1. Open the latest **v1.0.0** (or newer) release.
+1. Open the latest **v1.1.0** (or newer) release.
 2. Download **Simple AutoClicker.exe** under *Assets*.
 3. Run the file. No Python installation required.
 
